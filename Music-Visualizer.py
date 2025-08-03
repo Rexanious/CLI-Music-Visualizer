@@ -1,235 +1,240 @@
 #!/usr/bin/env python3
 import tkinter as tk
-from tkinter import filedialog
-import sounddevice as sd
+from tkinter import filedialog, ttk
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.animation import FuncAnimation  # THIS FIXES THE ERROR
+from matplotlib.animation import FuncAnimation
 import librosa
-import os
-from threading import Event
+import sounddevice as sd
+from scipy.ndimage import gaussian_filter1d
 
 
-class MusicVisualizer:
+class UltimateVisualizer:
     def __init__(self, root):
         self.root = root
-        self.root.title("Music Visualizer")
-        self.root.geometry("900x700")
+        self.root.title("ULTIMATE VISUALIZER")
+        self.root.geometry("1200x800")
+        self.root.configure(bg='#121212')
 
         # Audio properties
         self.audio_data = None
         self.sample_rate = 44100
         self.stream = None
-        self.stop_event = Event()
-        self.paused = False
-        self.ani = None  # Track animation object
+        self.playing = False
+        self.current_pos = 0
+        self.chunk_size = 1024 * 8  # Larger chunks for better performance
 
-        # UI Setup
+        # UI colors
+        self.bg_color = '#121212'
+        self.fg_color = '#ffffff'
+        self.accent_color = '#1f77b4'
+
+        # Visualization settings
+        self.bar_count = 50  # Default bar count
+        self.smoothing = 0.7
+
+        # Setup UI
         self.setup_ui()
 
+        # Setup visualization
+        self.fig, self.ax = plt.subplots(figsize=(12, 6), facecolor=self.bg_color)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.ax.set_facecolor(self.bg_color)
+
     def setup_ui(self):
-        # Control Frame
-        control_frame = tk.Frame(self.root)
-        control_frame.pack(pady=10)
+        # Main control frame
+        control_frame = tk.Frame(self.root, bg=self.bg_color)
+        control_frame.pack(fill=tk.X, padx=10, pady=10)
 
-        self.btn_open = tk.Button(
-            control_frame,
-            text="Open Audio File",
-            command=self.open_file,
-            width=15
-        )
-        self.btn_open.pack(side=tk.LEFT, padx=5)
+        # Button style
+        btn_style = {
+            'bg': '#333333',
+            'fg': self.fg_color,
+            'activebackground': '#444444',
+            'activeforeground': self.fg_color,
+            'borderwidth': 0,
+            'highlightthickness': 0,
+            'padx': 15,
+            'pady': 5
+        }
 
-        self.btn_play = tk.Button(
+        # File controls
+        tk.Button(
             control_frame,
-            text="Play",
+            text="📁 Open MP3",
+            command=self.load_audio,
+            **btn_style
+        ).pack(side=tk.LEFT, padx=5)
+
+        self.play_btn = tk.Button(
+            control_frame,
+            text="▶ Play",
             command=self.toggle_play,
             state=tk.DISABLED,
-            width=10
+            **btn_style
         )
-        self.btn_play.pack(side=tk.LEFT, padx=5)
+        self.play_btn.pack(side=tk.LEFT, padx=5)
 
-        self.btn_stop = tk.Button(
+        tk.Button(
             control_frame,
-            text="Stop",
+            text="⏹ Stop",
             command=self.stop_audio,
-            state=tk.DISABLED,
-            width=10
-        )
-        self.btn_stop.pack(side=tk.LEFT, padx=5)
+            **btn_style
+        ).pack(side=tk.LEFT, padx=5)
 
-        # Visualization Frame
-        self.fig, (self.ax_wave, self.ax_fft) = plt.subplots(2, 1, figsize=(10, 6))
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-
-        # Status Bar
-        self.status_var = tk.StringVar()
-        self.status_var.set("Ready to load audio file")
+        # Visualization controls
         tk.Label(
-            self.root,
-            textvariable=self.status_var,
-            bd=1,
-            relief=tk.SUNKEN,
-            anchor=tk.W
-        ).pack(fill=tk.X)
+            control_frame,
+            text="Bars:",
+            bg=self.bg_color,
+            fg=self.fg_color
+        ).pack(side=tk.LEFT, padx=(20, 5))
 
-    def open_file(self):
-        filetypes = [
-            ("Audio Files", "*.mp3 *.wav *.flac *.ogg"),
-            ("All Files", "*.*")
-        ]
-
-        file_path = filedialog.askopenfilename(
-            title="Select Audio File",
-            initialdir=os.path.expanduser("~/Music"),
-            filetypes=filetypes
+        self.bar_slider = ttk.Scale(
+            control_frame,
+            from_=20,
+            to=100,
+            value=self.bar_count,
+            command=self.update_bar_count
         )
+        self.bar_slider.pack(side=tk.LEFT, padx=5)
 
+        # Visualization type
+        self.vis_type = tk.StringVar(value='wave')
+        tk.Radiobutton(
+            control_frame,
+            text="Wave",
+            variable=self.vis_type,
+            value='wave',
+            bg=self.bg_color,
+            fg=self.fg_color,
+            selectcolor=self.bg_color,
+            activebackground=self.bg_color,
+            command=self.update_visualization
+        ).pack(side=tk.LEFT, padx=5)
+
+        tk.Radiobutton(
+            control_frame,
+            text="Bars",
+            variable=self.vis_type,
+            value='bars',
+            bg=self.bg_color,
+            fg=self.fg_color,
+            selectcolor=self.bg_color,
+            activebackground=self.bg_color,
+            command=self.update_visualization
+        ).pack(side=tk.LEFT, padx=5)
+
+    def load_audio(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Audio Files", "*.mp3 *.wav")])
         if file_path:
             try:
-                self.status_var.set("Loading audio file...")
-                self.root.update()
-
-                self.audio_data, self.sample_rate = librosa.load(
-                    file_path,
-                    sr=None,
-                    mono=True
-                )
-
-                self.file_path = file_path
+                self.audio_data, self.sample_rate = librosa.load(file_path, sr=None, mono=True)
                 self.current_pos = 0
-                self.stop_event.clear()
-
-                self.btn_play.config(state=tk.NORMAL)
-                self.status_var.set(
-                    f"Loaded: {os.path.basename(file_path)} | "
-                    f"Duration: {len(self.audio_data) / self.sample_rate:.2f}s"
-                )
-
-                # Initialize empty plot
+                self.play_btn.config(state=tk.NORMAL)
                 self.update_visualization()
-
             except Exception as e:
-                self.status_var.set(f"Error: {str(e)}")
-                self.btn_play.config(state=tk.DISABLED)
+                print(f"Error loading file: {e}")
 
     def toggle_play(self):
-        if not self.paused:
+        if not self.playing:
             self.start_audio()
-            self.btn_play.config(text="Pause")
+            self.play_btn.config(text="⏸ Pause")
         else:
             self.pause_audio()
-            self.btn_play.config(text="Play")
+            self.play_btn.config(text="▶ Play")
 
     def start_audio(self):
-        if self.audio_data is None:
-            return
-
-        self.paused = False
-        self.btn_stop.config(state=tk.NORMAL)
+        self.playing = True
 
         def audio_callback(outdata, frames, time, status):
-            if self.stop_event.is_set() or self.paused:
-                outdata[:] = 0
+            if self.current_pos + frames > len(self.audio_data):
                 raise sd.CallbackStop
-
-            available = len(self.audio_data) - self.current_pos
-            if available < frames:
-                outdata[:available] = self.audio_data[self.current_pos:].reshape(-1, 1)
-                outdata[available:] = 0
-                self.current_pos += available
-                raise sd.CallbackStop
-            else:
-                outdata[:] = self.audio_data[self.current_pos:self.current_pos + frames].reshape(-1, 1)
-                self.current_pos += frames
+            outdata[:, 0] = self.audio_data[self.current_pos:self.current_pos + frames]
+            self.current_pos += frames
 
         self.stream = sd.OutputStream(
             samplerate=self.sample_rate,
             channels=1,
             callback=audio_callback,
-            finished_callback=self.audio_finished
+            finished_callback=self.stop_audio
         )
+        self.stream.start()
 
-        try:
-            self.stream.start()
-            # THIS IS THE CRITICAL FIX - properly initialize animation
-            if self.ani is not None:
-                self.ani.event_source.stop()
-            self.ani = FuncAnimation(
-                self.fig,
-                lambda i: self.update_visualization(),
-                interval=50,
-                cache_frame_data=False
-            )
-            self.canvas.draw()
-        except Exception as e:
-            self.status_var.set(f"Playback error: {str(e)}")
+        self.ani = FuncAnimation(
+            self.fig,
+            self.update_visualization,
+            interval=30,  # ~33fps
+            cache_frame_data=False
+        )
+        self.canvas.draw()
 
     def pause_audio(self):
-        self.paused = True
+        self.playing = False
         if self.stream:
             self.stream.stop()
+        if self.ani:
+            self.ani.event_source.stop()
 
     def stop_audio(self):
-        self.stop_event.set()
-        self.paused = False
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
-        if self.ani:
-            self.ani.event_source.stop()  # Properly stop animation
+        self.pause_audio()
         self.current_pos = 0
-        self.btn_play.config(text="Play")
-        self.btn_stop.config(state=tk.DISABLED)
         self.update_visualization()
+        self.play_btn.config(text="▶ Play")
 
-    def audio_finished(self):
-        if not self.paused:
-            self.stop_audio()
+    def update_bar_count(self, val):
+        self.bar_count = int(float(val))
+        if self.playing:
+            self.update_visualization()
 
-    def update_visualization(self):
+    def update_visualization(self, i=0):
         if self.audio_data is None:
             return
 
-        chunk_size = 4096
-        start_pos = max(0, self.current_pos - chunk_size)
-        chunk = self.audio_data[start_pos:self.current_pos]
+        chunk_size = 1024 * 8
+        chunk = self.audio_data[self.current_pos:self.current_pos + chunk_size]
 
-        if len(chunk) < 100:
-            return
+        self.ax.clear()
 
-        self.ax_wave.clear()
-        self.ax_fft.clear()
+        if self.vis_type.get() == 'wave':
+            # Waveform visualization
+            self.ax.plot(chunk, color=self.accent_color, linewidth=1)
+            self.ax.set_ylim(-1, 1)
+        else:
+            # Optimized bar visualization
+            fft = np.abs(np.fft.rfft(chunk)[:chunk_size // 2])
+            fft = gaussian_filter1d(fft, sigma=self.smoothing * 5)
 
-        # Waveform
-        self.ax_wave.plot(chunk, color='cyan', alpha=0.8)
-        self.ax_wave.set_title("Waveform")
-        self.ax_wave.set_ylim(-1, 1)
+            # Downsample to bar count
+            indices = np.linspace(0, len(fft) - 1, self.bar_count, dtype=int)
+            heights = fft[indices]
 
-        # FFT
-        fft = np.abs(np.fft.rfft(chunk)[:chunk_size // 2])
-        freqs = np.fft.rfftfreq(len(chunk), 1 / self.sample_rate)[:chunk_size // 2]
-        self.ax_fft.plot(freqs, fft, color='magenta')
-        self.ax_fft.set_title("Frequency Spectrum")
-        self.ax_fft.set_xlim(0, 5000)
+            # Normalize and plot
+            max_height = max(1, np.max(heights))
+            self.ax.bar(
+                indices,
+                heights / max_height,
+                width=(len(fft) / self.bar_count) * 0.8,
+                color=self.accent_color
+            )
+            self.ax.set_ylim(0, 1.1)
 
-        # Progress info
-        progress = self.current_pos / len(self.audio_data)
-        self.ax_fft.text(
-            0.5, -0.2,
-            f"Progress: {progress:.1%} | "
-            f"Status: {'Paused' if self.paused else 'Playing'}",
-            transform=self.ax_fft.transAxes,
-            ha='center'
-        )
+        # Style the plot
+        self.ax.set_facecolor(self.bg_color)
+        self.ax.tick_params(colors=self.fg_color)
+        for spine in self.ax.spines.values():
+            spine.set_color(self.fg_color)
 
-        self.fig.tight_layout()
+        self.ax.set_xticks([])
+        self.ax.set_yticks([])
         self.canvas.draw()
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = MusicVisualizer(root)
+    app = UltimateVisualizer(root)
     root.mainloop()
+    
+    
