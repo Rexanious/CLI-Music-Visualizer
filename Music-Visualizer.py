@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 import tkinter as tk
+from contextlib import nullcontext
 from tkinter import filedialog, ttk, messagebox
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.animation import FuncAnimation
-import librosa
 import sounddevice as sd
+import scipy
+from numba.core.cgutils import false_bit
+from rich.control import Control
 from scipy.ndimage import gaussian_filter1d
 import imageio
 import threading
-import os
-import time
+import traceback
 from queue import Queue
+import os
 
 
 class Visualizer:
@@ -21,6 +24,8 @@ class Visualizer:
         self.root.title("VISUALIZER")
         self.root.geometry("1200x800")
         self.root.configure(bg='#121212')
+        self.root.protocol("WM_DELETE_WINDOW", self.clean_exit)
+        self.root.bind("<Alt-F4>", lambda e: self.clean_exit())
 
         self.audio_data = None
         self.sample_rate = 44100
@@ -164,16 +169,21 @@ class Visualizer:
         self.update_visualization()
 
     def load_audio(self):
-        file_path = filedialog.askopenfilename(filetypes=[("MP3 Files", "*.mp3")])
-        if file_path:
-            try:
-                self.audio_data, self.sample_rate = librosa.load(file_path, sr=None, mono=True)
-                self.current_pos = 0
-                self.play_btn.config(state=tk.NORMAL)
-                self.export_btn.config(state=tk.NORMAL)
-                self.update_visualization()
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to load audio file:\n{e}")
+        file_path = filedialog.askopenfilename(filetypes=[("Audio Files", "*.mp3 *.wav *.ogg")])
+        if not file_path:
+            return
+
+        try:
+            # WORKAROUND: Use soundfile instead of librosa to avoid scipy.stats
+            import soundfile as sf
+            self.audio_data, self.sample_rate = sf.read(file_path, dtype='float32')
+            self.audio_data = np.mean(self.audio_data, axis=1)  # Force mono
+            self.current_pos = 0
+            self.play_btn.config(state=tk.NORMAL)
+            self.export_btn.config(state=tk.NORMAL)
+            self.update_visualization()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load audio:\n{str(e)}")
 
     def toggle_play(self):
         if not self.playing:
@@ -349,8 +359,27 @@ class Visualizer:
 
         return self.ax.artists if self.vis_type == "bars" else []
 
+    def clean_exit(self):
+        if self.stream and self.playing:
+            self.stream.stop()
+            self.stream.close()
+
+        if self.export_thread and self.export_thread.is_alive():
+            self.export_thread.join(0.5)
+
+        if os.name == 'nt':
+            import ctypes
+            ctypes.windll.kernel32.ExitProcess(0)
+
+        self.root.destroy()
+
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = Visualizer(root)
-    root.mainloop()
+    try:
+        root = tk.Tk()
+        app = Visualizer(root)
+        root.mainloop()
+    except Exception as e:
+        with open("error_log.txt", "w") as f:
+            f.write(str(e) + "\n\n" + traceback.format_exc())
+        messagebox.showerror("Critical Error", f"The application crashed:\n{str(e)}\n\nDetails written to error_log.txt")
